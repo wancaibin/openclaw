@@ -1,0 +1,27 @@
+{
+  "name": "birdnet",
+  "version": "1.0.0",
+  "description": "BirdNET 鸟类鸣叫识别",
+  "author": "OpenClaw",
+  "commands": [
+    {
+      "name": "birdnet_identify",
+      "description": "识别音频文件中的鸟类",
+      "script": "identify.sh",
+      "args": ["audio_file"]
+    }
+  ],
+  "config": {
+    "apiKey": {
+      "type": "string",
+      "required": false,
+      "description": "BirdNET API 密钥"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["api", "local"],
+      "default": "api",
+      "description": "运行模式：api 或 local"
+    }
+  }
+}
