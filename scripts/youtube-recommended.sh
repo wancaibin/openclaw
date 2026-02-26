@@ -119,6 +119,7 @@ SMTP_USER = "370583129@qq.com"
 SMTP_PASS = "lqcptvkryrrubgde"
 RECIPIENT = "370583129@qq.com"
 ATTACHMENT_PATH = "$OUTPUT_FILE"
+VIDEO_COUNT = $count
 
 try:
     # 创建邮件
@@ -135,7 +136,7 @@ try:
 YouTube 推荐视频抓取完成！
 
 抓取时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-共抓取 {count} 个中文视频，每条包含摘要。
+共抓取 {VIDEO_COUNT} 个中文视频，每条包含摘要。
 视频列表请查看附件。
 
 ---
