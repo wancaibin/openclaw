@@ -1,0 +1,9 @@
+# 生成的文件
+*.vtt
+*.txt
+*.mp3
+*.json
+
+# 保留脚本和文档
+!SKILL.md
+!scripts/
