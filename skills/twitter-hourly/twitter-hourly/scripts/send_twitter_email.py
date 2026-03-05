@@ -8,6 +8,7 @@ import smtplib
 import subprocess
 import sys
 import os
+import zipfile
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -18,6 +19,7 @@ SMTP_HOST = "smtp.qq.com"
 SMTP_PORT = 465
 SMTP_USER = "370583129@qq.com"
 ATTACHMENT_PATH = "/Users/wcb/.openclaw/workspace/x.md"
+ZIP_PATH = "/Users/wcb/.openclaw/workspace/x.zip"
 
 def get_password():
     """从钥匙串获取密码"""
@@ -37,35 +39,27 @@ def send_email_with_attachment():
     msg['To'] = SMTP_USER
     msg['Subject'] = f"Twitter Home Timeline - {sys.argv[1] if len(sys.argv) > 1 else '2026-02-26'}"
     
-    # 添加邮件正文
-    body = """Twitter Home Timeline 已获取成功！
-
-共 100 条动态，详见附件 x.md 文件。
-
-以下是前 5 条动态预览：
-"""
-    
-    # 读取 x.md 前 500 行作为预览
-    try:
-        with open(ATTACHMENT_PATH, 'r', encoding='utf-8') as f:
-            preview = ''.join(f.readlines()[:50])
-            body += "\n" + preview[:2000] + "\n\n...（更多内容请查看附件）"
-    except Exception as e:
-        body += f"\n预览失败：{e}"
-    
-    body += "\n\n--\n卡卡 👾"
+    # 邮件正文留空，只发附件
+    body = ""
     msg.attach(MIMEText(body, 'plain', 'utf-8'))
     
-    # 添加附件
+    # 压缩文件并添加为附件
     try:
-        with open(ATTACHMENT_PATH, 'rb') as f:
+        # 创建 zip 压缩包
+        with zipfile.ZipFile(ZIP_PATH, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            zipf.write(ATTACHMENT_PATH, 'x.md')
+        
+        print(f"📦 已压缩：x.md → x.zip")
+        
+        # 添加 zip 附件
+        with open(ZIP_PATH, 'rb') as f:
             part = MIMEBase('application', 'octet-stream')
             part.set_payload(f.read())
         
         encoders.encode_base64(part)
-        part.add_header('Content-Disposition', 'attachment; filename="x.md"')
+        part.add_header('Content-Disposition', 'attachment; filename="x.zip"')
         msg.attach(part)
-        print(f"📎 附件已添加：x.md")
+        print(f"📎 附件已添加：x.zip")
     except Exception as e:
         print(f"❌ 附件添加失败：{e}")
         return False
