@@ -21,13 +21,137 @@ fi
 
 # 使用 proxychains4 通过代理获取 Twitter
 echo "📡 通过代理获取 Twitter 数据..."
-proxychains4 -q bird home -n 100 --auth-token "$AUTH_TOKEN" --ct0 "$CT0" > x.md 2>&1
+proxychains4 -q bird home -n 100 --auth-token "$AUTH_TOKEN" --ct0 "$CT0" > x_raw.md 2>&1
 
-if [ $? -ne 0 ] || [ ! -s x.md ]; then
+if [ $? -ne 0 ] || [ ! -s x_raw.md ]; then
     echo "❌ 获取 Twitter 数据失败"
-    cat x.md
+    cat x_raw.md
     exit 1
 fi
+
+# 过滤：只保留中文推文正文（去掉用户名、分隔线、图片链接、时间、链接、日语、重复推文等）
+echo "🧹 过滤非正文内容..."
+python3 << 'EOF'
+import re
+import hashlib
+import os
+import json
+
+HISTORY_FILE = '/Users/wcb/.openclaw/workspace/twitter_history.json'
+
+def is_mostly_chinese(text):
+    """检查文本是否主要为中文（排除日语）"""
+    # 中文字符范围
+    chinese_chars = re.findall(r'[\u4e00-\u9fff]', text)
+    # 日语平假名、片假名范围
+    japanese_hiragana = re.findall(r'[\u3040-\u309f]', text)
+    japanese_katakana = re.findall(r'[\u30a0-\u30ff]', text)
+    
+    total_cjk = len(chinese_chars) + len(japanese_hiragana) + len(japanese_katakana)
+    if total_cjk == 0:
+        return False
+    
+    # 如果有日语字符，且日语字符占比超过 20%，则认为是日语
+    japanese_ratio = (len(japanese_hiragana) + len(japanese_katakana)) / total_cjk
+    if japanese_ratio > 0.2:
+        return False
+    
+    # 中文字符占比超过 50% 则认为是中文
+    chinese_ratio = len(chinese_chars) / total_cjk
+    return chinese_ratio >= 0.5
+
+def get_tweet_hash(text):
+    """生成推文内容的哈希值"""
+    return hashlib.md5(text.strip().encode('utf-8')).hexdigest()
+
+def load_history():
+    """加载历史推文哈希"""
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except:
+            pass
+    return set()
+
+def save_history(history_set):
+    """保存历史推文哈希"""
+    with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+        json.dump(list(history_set), f, ensure_ascii=False, indent=2)
+
+# 加载历史记录
+history = load_history()
+print(f"📚 已加载 {len(history)} 条历史推文")
+
+with open('x_raw.md', 'r', encoding='utf-8') as f:
+    content = f.read()
+
+# 按分隔符分割推文
+tweets = re.split(r'─{10,}', content)
+
+cleaned = []
+new_hashes = set()
+duplicates = 0
+
+for tweet in tweets:
+    lines = tweet.strip().split('\n')
+    text_lines = []
+    for line in lines:
+        line = line.strip()
+        # 跳过空行
+        if not line:
+            continue
+        # 跳过用户名行 (@xxx (xxx):)
+        if re.match(r'^@\w+\s*\(', line):
+            continue
+        # 跳过图片/视频链接 (🎬 🖼️ 📸)
+        if line.startswith('🎬') or line.startswith('🖼️') or line.startswith('📸'):
+            continue
+        # 跳过时间行 (📅)
+        if line.startswith('📅'):
+            continue
+        # 跳过链接行 (🔗)
+        if line.startswith('🔗'):
+            continue
+        # 跳过分隔线
+        if re.match(r'^─{10,}$', line):
+            continue
+        # 去掉所有链接 (http/https/www)
+        line = re.sub(r'\s*https?://\S+', '', line)
+        line = re.sub(r'\s*www\.\S+', '', line)
+        # 去掉 📰 等前缀
+        line = re.sub(r'^[📰🎬🖼️📸🔗📅]\s*', '', line)
+        # 跳过处理后的空行
+        if not line.strip():
+            continue
+        # 保留正文
+        text_lines.append(line.strip())
+    
+    # 检查整条推文是否主要为中文
+    if text_lines:
+        tweet_text = '\n'.join(text_lines)
+        if is_mostly_chinese(tweet_text):
+            # 检查是否重复
+            tweet_hash = get_tweet_hash(tweet_text)
+            if tweet_hash in history or tweet_hash in new_hashes:
+                duplicates += 1
+                continue
+            new_hashes.add(tweet_hash)
+            cleaned.append(tweet_text)
+
+# 保存新的历史记录
+history.update(new_hashes)
+save_history(history)
+print(f"📚 已更新历史记录：{len(history)} 条推文")
+
+# 写入过滤后的文件
+with open('x.md', 'w', encoding='utf-8') as f:
+    f.write('\n\n──────────────────────────────────────────────────\n\n'.join(cleaned))
+
+print(f"✅ 过滤完成，保留 {len(cleaned)} 条中文推文（去重 {duplicates} 条）")
+EOF
+
+rm -f x_raw.md
 
 LINES=$(wc -l < x.md)
 echo "✅ 成功获取 $LINES 行 Twitter 数据"
