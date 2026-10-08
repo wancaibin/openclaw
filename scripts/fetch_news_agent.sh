@@ -29,7 +29,7 @@ except Exception as e:
 
 if [ $? -eq 0 ]; then
     RAW_TEXT=$(cat /tmp/cron_agent_news_raw.txt)
-    PROMPT="请将以下外网新闻精简总结成流畅自然的中文语音播报短稿。包含热点时事、科技及最新突发动态。严格要求：1. 控制在200到300字以内（语速适中，时长约50秒左右，严禁过长）；2. 必须全中文，专有名词可音译或意译；3. 语气像老朋友聊天，开头统一用'铁狗蛋，最新热点猛料来啦：'，自然精炼播报；4. 直接给出最终纯中文稿本，不要解释。\n\n$RAW_TEXT"
+    PROMPT="请将以下外网新闻精简总结成流畅自然的中文语音播报短稿。包含热点时事、科技及最新突发动态。严格要求：1. 控制在200到300字以内（语速适中，时长约50秒左右，严禁过长）；2. 必须全中文，专有名词可音译或意译；3. 语气像老朋友聊天，不要任何开场白、问候语或标题，直接切入第一条新闻核心内容开始播报；4. 直接给出最终纯中文稿本，不要解释。\n\n$RAW_TEXT"
     
     openclaw infer model run --model custom-127-0-0-1-7861/gemini-3.8-flash-tiered --prompt "$PROMPT" --json > /tmp/cron_agent_news_infer.json
     cat /tmp/cron_agent_news_infer.json | jq -r '.outputs[0].text' > /tmp/cron_agent_news.txt
