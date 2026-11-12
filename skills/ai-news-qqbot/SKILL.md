@@ -1,18 +1,18 @@
 ---
 name: ai-news-qqbot
 description: >-
-  搜索 X (Twitter)、Reddit、Hacker News (HN)、GitHub Trending、ArXiv 及主流技术媒体等全网人工智能 (AI) 最新动态，整理为新闻播报稿，通过 TTS 转为音频，并直接推送音频与文字摘要到绑定的 QQ 机器人。适用于用户需要获取每日/即时 AI 资讯播报并推送到 QQ 机器人的场景。
+  搜索 X (Twitter)、Reddit、Hacker News (HN)、TechCrunch、The Verge、GitHub Trending、ArXiv 及 Hugging Face 等全网人工智能 (AI) 最新动态，直接读取完整文章与资讯全文（不再进行摘要截取），通过 TTS 转为完整自然语音音频，并直接推送音频与完整图文内容到绑定的 QQ 机器人。适用于用户需要获取每日/即时 AI 完整深度资讯播报并推送到 QQ 机器人的场景。
 ---
 
-# AI 资讯检索、TTS 语音播报与 QQ 机器人推送
+# AI 资讯完整全文读取、TTS 语音播报与 QQ 机器人推送
 
 该技能自动化执行以下完整流程：
-1. **多源检索**：在 X (Twitter)、Reddit、Hacker News (HN)、GitHub、ArXiv 等多渠道检索最新的 AI 技术、行业动态与热点讨论。
-2. **文本生成**：梳理并编写结构清晰、适合语音播报的中文简报稿件（分段、去外链与特殊符号）。
+1. **多源深度检索**：在 TechCrunch、The Verge、Hacker News、ArXiv cs.AI、Hugging Face 等渠道检索最新的 AI 技术、行业动态与热点讨论。
+2. **全文直读与翻译**：直接抓取文章与资讯的完整网页正文及论文 Abstract 全文（不再进行摘要截断），完整翻译为中文。
 3. **TTS 语音合成**：使用 edge-tts 生成高质量中文自然语音音频文件（MP3）。
 4. **QQ 机器人推送**：
    - 调用专用脚本将音频文件（以语音/文件格式）推送到绑定的 QQ 机器人。
-   - 通过 `hermes send --to qqbot` 发送图文/文字版要点速览。
+   - 通过 `hermes send --to qqbot` 发送完整文字版资讯内容（超长自动分段发送）。
 
 ---
 

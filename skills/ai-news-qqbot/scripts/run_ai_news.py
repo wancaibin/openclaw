@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
-AI News fetcher, deep summarizer, deduplicator, TTS synthesizer, and QQ Bot dispatcher.
-Optimized for OpenClaw Gateway cron execution with multi-source ingestion and diversity selection.
+AI News fetcher, full-text reader, deduplicator, TTS synthesizer, and QQ Bot dispatcher.
+Reads full articles/papers/discussions without summary truncation.
+Integrated Sources:
+  - TechCrunch AI (Business/Funding/Industry)
+  - The Verge AI (Consumer Tech & Trends)
+  - Hacker News AI (Top Community Tech Debates via Algolia & RSS)
+  - Hugging Face Daily Papers (Top Community Papers)
+  - arXiv cs.AI (Academic Research Abstracts)
+  - X / Twitter AI (Frontier labs & AI figures trending discussions)
+  - Reddit AI (r/LocalLLaMA, r/singularity, r/MachineLearning)
+  - OpenAI Newsroom (Official Models & Releases)
+  - GitHub Trending (Trending Open-Source AI/LLM Projects)
 """
 import os
 import re
@@ -73,12 +83,83 @@ def clean_html(raw_html: str) -> str:
     cleanr = re.compile(r'<.*?>')
     text = re.sub(cleanr, ' ', raw_html)
     text = html.unescape(text)
-    # 过滤常见无意义前缀
     text = re.sub(r'^(Abstract:?|Summary:?)\s*', '', text.strip(), flags=re.IGNORECASE)
     return " ".join(text.split())
 
+def fetch_full_web_article(url: str) -> str:
+    """Fetch complete web article content from URL without truncation."""
+    if not url or not url.startswith("http"):
+        return ""
+    try:
+        req = urllib.request.Request(url, headers=REQ_HEADERS)
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            if "text/html" not in content_type and "application/xhtml" not in content_type:
+                return ""
+            raw = resp.read().decode("utf-8", errors="replace")
+
+        # Strip scripts, styles, metadata
+        clean = re.sub(r'<(script|style|nav|header|footer|aside|form|svg|noscript)[^>]*>.*?</\1>', ' ', raw, flags=re.DOTALL|re.IGNORECASE)
+        
+        # Look for article or main content tags
+        article_match = re.search(r'<(article|main)[^>]*>(.*?)</\1>', clean, flags=re.DOTALL|re.IGNORECASE)
+        target_html = article_match.group(2) if article_match else clean
+
+        # Extract paragraphs
+        p_matches = re.findall(r'<p[^>]*>(.*?)</p>', target_html, flags=re.DOTALL|re.IGNORECASE)
+        paras = []
+        skip_phrases = [
+            "cookie", "subscribe", "sign up", "privacy policy", "terms of service", 
+            "terms of use", "all rights reserved", "advertisement", "newsletter",
+            "follow us", "share this", "photo by", "image credit"
+        ]
+        for p in p_matches:
+            t = clean_html(p)
+            if len(t) > 35 and not any(skip in t.lower() for skip in skip_phrases):
+                paras.append(t)
+        
+        if paras:
+            return "\n\n".join(paras)
+        return ""
+    except Exception as e:
+        print(f"[!] 抓取原文全文失败 ({url}): {e}", file=sys.stderr)
+        return ""
+
+def translate_via_youdao(text: str) -> str:
+    """Use Youdao free translation API."""
+    if not text or not text.strip():
+        return ""
+    try:
+        url = "https://aidemo.youdao.com/trans"
+        data = urllib.parse.urlencode({"q": text, "from": "Auto", "to": "zh-CHS"}).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=REQ_HEADERS)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            translations = data.get("translation", [])
+            if translations and translations[0]:
+                return "\n".join(translations).strip()
+    except Exception as e:
+        pass
+    return ""
+
+def translate_via_mymemory(text: str) -> str:
+    """Use MyMemory free translation API."""
+    if not text or not text.strip():
+        return ""
+    try:
+        url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text[:500])}&langpair=en|zh-CN"
+        req = urllib.request.Request(url, headers=REQ_HEADERS)
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            translated = data.get("responseData", {}).get("translatedText", "")
+            if translated and not translated.startswith("MYMEMORY WARNING"):
+                return translated.strip()
+    except Exception as e:
+        pass
+    return ""
+
 def translate_to_zh(text: str) -> str:
-    """Translate text to Chinese using Google Translate web API without premature truncation."""
+    """Translate text to Chinese using fast free online web services (Youdao / MyMemory / Google fallback)."""
     if not text or not text.strip():
         return ""
     # 若本身主要包含中文字符，则直接返回
@@ -86,38 +167,64 @@ def translate_to_zh(text: str) -> str:
     if zh_chars > len(text) * 0.3:
         return text.strip()
 
-    # 分块翻译，避免单次 URL 超长导致截断或请求失败
-    remaining = text.strip()
+    paragraphs = [p.strip() for p in text.split("\n") if p.strip()]
+    if not paragraphs:
+        paragraphs = [text.strip()]
+
     chunks = []
-    chunk_limit = 1200
-    while len(remaining) > chunk_limit:
-        split_idx = remaining.rfind(' ', 0, chunk_limit)
-        if split_idx == -1:
-            split_idx = chunk_limit
-        chunks.append(remaining[:split_idx])
-        remaining = remaining[split_idx:].strip()
-    if remaining:
-        chunks.append(remaining)
+    chunk_limit = 1000
+    for p in paragraphs:
+        remaining = p
+        while len(remaining) > chunk_limit:
+            split_idx = remaining.rfind(' ', 0, chunk_limit)
+            if split_idx == -1:
+                split_idx = chunk_limit
+            chunks.append(remaining[:split_idx])
+            remaining = remaining[split_idx:].strip()
+        if remaining:
+            chunks.append(remaining)
 
     translated_parts = []
     for chunk in chunks:
-        try:
-            url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=" + urllib.parse.quote(chunk)
-            req = urllib.request.Request(url, headers=REQ_HEADERS)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                chunk_zh = "".join([part[0] for part in data[0] if part and part[0]]).strip()
-                translated_parts.append(chunk_zh)
-        except Exception as e:
-            print(f"[!] 翻译片段出错: {e}", file=sys.stderr)
-            translated_parts.append(chunk)
+        # 1. 优先使用快速稳定的有道在线翻译接口（毫秒级响应）
+        translated_chunk = translate_via_youdao(chunk)
 
-    return " ".join(translated_parts).strip()
+        # 2. 备选 MyMemory 免费翻译服务
+        if not translated_chunk:
+            translated_chunk = translate_via_mymemory(chunk)
+
+        # 3. 备选 Google Web 翻译接口
+        if not translated_chunk:
+            try:
+                url = "https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=auto&tl=zh-CN&q=" + urllib.parse.quote(chunk)
+                req = urllib.request.Request(url, headers=REQ_HEADERS)
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    if isinstance(data, list) and data and isinstance(data[0], list) and data[0]:
+                        translated_chunk = data[0][0]
+                    elif isinstance(data, list) and data and isinstance(data[0], str):
+                        translated_chunk = data[0]
+            except Exception:
+                pass
+
+        if not translated_chunk:
+            try:
+                url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=" + urllib.parse.quote(chunk)
+                req = urllib.request.Request(url, headers=REQ_HEADERS)
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    translated_chunk = "".join([part[0] for part in data[0] if part and part[0]]).strip()
+            except Exception:
+                pass
+
+        translated_parts.append(translated_chunk if translated_chunk else chunk)
+
+    return "\n".join(translated_parts).strip()
 
 # ==================== 数据源抓取模块 ====================
 
 def fetch_techcrunch_ai():
-    """1. 商业前沿: TechCrunch AI 投融资与产品报道"""
+    """1. 商业前沿: TechCrunch AI"""
     items = []
     try:
         url = "https://techcrunch.com/category/artificial-intelligence/feed/"
@@ -129,7 +236,7 @@ def fetch_techcrunch_ai():
                 link = entry.find("link").text if entry.find("link") is not None else ""
                 desc_el = entry.find("description")
                 desc = clean_html(desc_el.text) if desc_el is not None and desc_el.text else ""
-                if title:
+                if title and link:
                     items.append({
                         "category": "商业前沿",
                         "source": "TechCrunch",
@@ -143,7 +250,7 @@ def fetch_techcrunch_ai():
     return items
 
 def fetch_verge_ai():
-    """2. 科技前沿: The Verge AI 热点"""
+    """2. 科技动态: The Verge AI"""
     items = []
     try:
         url = "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"
@@ -159,7 +266,7 @@ def fetch_verge_ai():
                 if content_el is None:
                     content_el = entry.find("atom:summary", ns)
                 desc = clean_html(content_el.text) if content_el is not None and content_el.text else ""
-                if title:
+                if title and link:
                     items.append({
                         "category": "科技动态",
                         "source": "The Verge",
@@ -173,38 +280,36 @@ def fetch_verge_ai():
     return items
 
 def fetch_hn_ai():
-    """3. 社区热点: Hacker News 首页高赞 AI/Agent 讨论"""
+    """3. 社区热议: Hacker News 最新 AI 讨论 (通过 Algolia API 及 RSS)"""
     items = []
-    ai_keywords = [
-        "ai", "llm", "gpt", "claude", "agent", "deepseek", "gemini",
-        "neural", "model", "openai", "anthropic", "robot", "reasoning"
-    ]
     try:
-        url = "https://news.ycombinator.com/rss"
+        url = "https://hn.algolia.com/api/v1/search_by_date?tags=story&query=AI&hitsPerPage=10"
         req = urllib.request.Request(url, headers=REQ_HEADERS)
         with urllib.request.urlopen(req, timeout=8) as resp:
-            root = ET.fromstring(resp.read().decode("utf-8", errors="replace"))
-            for entry in root.findall(".//item"):
-                title = entry.find("title").text if entry.find("title") is not None else ""
-                link = entry.find("link").text if entry.find("link") is not None else ""
-                title_lower = title.lower()
-                if any(re.search(rf"\b{re.escape(kw)}\b", title_lower) for kw in ai_keywords):
+            data = json.loads(resp.read().decode("utf-8"))
+            for hit in data.get("hits", []):
+                title = hit.get("title", "")
+                link = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID')}"
+                story_text = clean_html(hit.get("story_text", ""))
+                points = hit.get("points", 0)
+                comments = hit.get("num_comments", 0)
+                desc = story_text if story_text else f"Hacker News 热议议题，当前获得 {points} 点赞及 {comments} 条深度技术讨论。"
+                if title:
                     items.append({
                         "category": "社区热议",
                         "source": "Hacker News",
                         "title": title.strip(),
-                        "details": "该议题目前在 Hacker News 技术社区引发广泛关注与热烈讨论。",
+                        "details": desc,
                         "link": link.strip(),
+                        "comments_link": f"https://news.ycombinator.com/item?id={hit.get('objectID')}",
                         "key": get_item_key(title, link)
                     })
-                if len(items) >= 6:
-                    break
     except Exception as e:
         print(f"[!] 抓取 Hacker News 失败: {e}", file=sys.stderr)
     return items
 
 def fetch_hf_papers():
-    """4. 顶会精选: Hugging Face Daily Papers 社区高赞前沿论文"""
+    """4. 顶会精选: Hugging Face Daily Papers 社区高赞论文"""
     items = []
     try:
         url = "https://huggingface.co/api/daily_papers"
@@ -231,14 +336,13 @@ def fetch_hf_papers():
     return items
 
 def fetch_arxiv_ai():
-    """5. 学术科研: arXiv cs.AI 论文库 (扩大遍历至前80篇)"""
+    """5. 学术科研: arXiv cs.AI 论文库"""
     items = []
     try:
         url = "https://rss.arxiv.org/rss/cs.AI"
         req = urllib.request.Request(url, headers={**REQ_HEADERS, "Accept-Encoding": "identity"})
         with urllib.request.urlopen(req, timeout=12) as resp:
             root = ET.fromstring(resp.read().decode("utf-8", errors="replace"))
-            # 遍历前 80 篇，避免原先死切片 [:20] 导致被去重吃满后永远无法读后续新论文
             for entry in root.findall(".//item")[:80]:
                 title = entry.find("title").text if entry.find("title") is not None else ""
                 link = entry.find("link").text if entry.find("link") is not None else ""
@@ -260,85 +364,226 @@ def fetch_arxiv_ai():
         print(f"[!] 抓取 arXiv 失败: {e}", file=sys.stderr)
     return items
 
+def fetch_x_ai():
+    """6. 社交动态: X (Twitter) 前沿 AI 实验室与核心关注点"""
+    items = []
+    try:
+        url = "https://news.google.com/rss/search?q=site:x.com+AI+OR+LLM+OR+OpenAI+OR+Anthropic+OR+DeepSeek+when:1d&hl=en-US&gl=US&ceid=US:en"
+        req = urllib.request.Request(url, headers=REQ_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            root = ET.fromstring(resp.read().decode("utf-8", errors="replace"))
+            for entry in root.findall(".//item")[:15]:
+                title = entry.find("title").text if entry.find("title") is not None else ""
+                link = entry.find("link").text if entry.find("link") is not None else ""
+                desc = clean_html(entry.find("description").text) if entry.find("description") is not None else ""
+                clean_t = re.sub(r'\s*-\s*X$', '', title).strip()
+                if clean_t:
+                    items.append({
+                        "category": "社交动态",
+                        "source": "X (Twitter)",
+                        "title": clean_t,
+                        "details": desc if len(desc) > len(clean_t) else f"来自 X 平台关于前沿 AI 模型与行业最新动态的讨论：{clean_t}",
+                        "link": link.strip(),
+                        "key": get_item_key(clean_t, link)
+                    })
+    except Exception as e:
+        print(f"[!] 抓取 X (Twitter) 动态失败: {e}", file=sys.stderr)
+    return items
+
+def fetch_reddit_ai():
+    """7. 社区热点: Reddit (r/LocalLLaMA, r/singularity, r/MachineLearning)"""
+    items = []
+    try:
+        url = "https://news.google.com/rss/search?q=site:reddit.com/r/LocalLLaMA+OR+site:reddit.com/r/singularity+OR+site:reddit.com/r/MachineLearning+when:1d&hl=en-US&gl=US&ceid=US:en"
+        req = urllib.request.Request(url, headers=REQ_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            root = ET.fromstring(resp.read().decode("utf-8", errors="replace"))
+            for entry in root.findall(".//item")[:15]:
+                title = entry.find("title").text if entry.find("title") is not None else ""
+                link = entry.find("link").text if entry.find("link") is not None else ""
+                desc = clean_html(entry.find("description").text) if entry.find("description") is not None else ""
+                clean_t = re.sub(r'\s*-\s*Reddit$', '', title).strip()
+                if clean_t:
+                    items.append({
+                        "category": "社区热点",
+                        "source": "Reddit",
+                        "title": clean_t,
+                        "details": desc if len(desc) > len(clean_t) else f"Reddit AI 核心社区热门主题讨论：{clean_t}",
+                        "link": link.strip(),
+                        "key": get_item_key(clean_t, link)
+                    })
+    except Exception as e:
+        print(f"[!] 抓取 Reddit 失败: {e}", file=sys.stderr)
+    return items
+
+def fetch_openai_news():
+    """8. 官方动态: OpenAI Newsroom 官方公告与模型发布"""
+    items = []
+    try:
+        url = "https://openai.com/news/rss.xml"
+        req = urllib.request.Request(url, headers=REQ_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            root = ET.fromstring(resp.read().decode("utf-8", errors="replace"))
+            for entry in root.findall(".//item")[:10]:
+                title = entry.find("title").text if entry.find("title") is not None else ""
+                link = entry.find("link").text if entry.find("link") is not None else ""
+                desc = clean_html(entry.find("description").text) if entry.find("description") is not None else ""
+                if title:
+                    items.append({
+                        "category": "官方发布",
+                        "source": "OpenAI",
+                        "title": title.strip(),
+                        "details": desc if desc else f"OpenAI 官方发布最新动态：{title.strip()}",
+                        "link": link.strip(),
+                        "key": get_item_key(title, link)
+                    })
+    except Exception as e:
+        print(f"[!] 抓取 OpenAI 动态失败: {e}", file=sys.stderr)
+    return items
+
+def fetch_github_trending_ai():
+    """9. 开源前沿: GitHub Trending 开源热门 AI/LLM 项目"""
+    items = []
+    try:
+        url = "https://github.com/trending?since=daily"
+        req = urllib.request.Request(url, headers=REQ_HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html_text = resp.read().decode("utf-8", errors="replace")
+            articles = re.findall(r'<article class="Box-row">(.*?)</article>', html_text, flags=re.DOTALL)
+            ai_kw = ["ai", "llm", "agent", "model", "gpt", "rag", "deepseek", "chat", "voice", "reasoning", "diffusion"]
+            for art in articles:
+                repo_m = re.search(r'href="/([a-zA-Z0-9_\-\.]+/[a-zA-Z0-9_\-\.]+)"', art)
+                if not repo_m:
+                    continue
+                repo_name = repo_m.group(1)
+                desc_m = re.search(r'<p class="col-9[^\"]*">(.*?)</p>', art, flags=re.DOTALL)
+                desc = clean_html(desc_m.group(1)) if desc_m else ""
+                check_str = f"{repo_name} {desc}".lower()
+                if any(kw in check_str for kw in ai_kw):
+                    title = f"热门开源项目: {repo_name}"
+                    items.append({
+                        "category": "开源前沿",
+                        "source": "GitHub Trending",
+                        "title": title,
+                        "details": desc if desc else f"GitHub 当日热门开源 AI 项目：{repo_name}",
+                        "link": f"https://github.com/{repo_name}",
+                        "key": get_item_key(title, f"https://github.com/{repo_name}")
+                    })
+    except Exception as e:
+        print(f"[!] 抓取 GitHub Trending 失败: {e}", file=sys.stderr)
+    return items
+
 # ==================== 多样化挑选与排版 ====================
 
-def select_diverse_news(fresh_news, max_count=3):
+def select_diverse_news(fresh_news, max_count=2):
     """
     智能跨源均衡挑选：
-    优先从不同类别（商业前沿、科技动态、社区热议、学术科研）各挑 1 条，
-    确保每次播报内容丰富均衡，避免单一类别霸屏。
+    优先从不同源与不同类别各挑选 1 条，
+    确保每次播报内容丰富均衡，避免单一类别垄断。
     """
     grouped = {}
     for item in fresh_news:
-        cat = item["category"]
-        grouped.setdefault(cat, []).append(item)
+        src = item["source"]
+        grouped.setdefault(src, []).append(item)
 
     selected = []
-    # 优先级类别轮询
-    priority_order = ["商业前沿", "科技动态", "社区热议", "顶会精选", "学术科研"]
-    while len(selected) < max_count:
-        picked_in_this_round = False
-        for cat in priority_order:
-            if cat in grouped and grouped[cat]:
-                selected.append(grouped[cat].pop(0))
-                picked_in_this_round = True
+    # 轮流从各个不同的 source 挑选
+    sources_pool = list(grouped.keys())
+    while len(selected) < max_count and sources_pool:
+        for s in list(sources_pool):
+            if grouped[s]:
+                selected.append(grouped[s].pop(0))
                 if len(selected) >= max_count:
                     break
-        # 如果所有已知类别都空了，检查其他剩余
-        if not picked_in_this_round:
-            for cat, items in list(grouped.items()):
-                if items:
-                    selected.append(items.pop(0))
-                    if len(selected) >= max_count:
-                        break
-            break
+            else:
+                sources_pool.remove(s)
     return selected
 
+def populate_full_content(item: dict) -> str:
+    """获取条目的完整原文内容（优先获取网页正文，降级使用完整摘要或讨论）"""
+    link = item.get("link", "")
+    src = item.get("source", "")
+    
+    # 商业前沿、科技动态、OpenAI 官方博客：抓取文章网页完整正文
+    if src in ["TechCrunch", "The Verge", "OpenAI"] and link:
+        print(f"[*] 正在抓取 [{src}] 网页完整正文: {link}")
+        full_text = fetch_full_web_article(link)
+        if full_text and len(full_text) > 100:
+            return full_text
+
+    # Hacker News: 优先抓取外链原文，若不可读则回退
+    if src == "Hacker News":
+        if link and not link.startswith("https://news.ycombinator.com"):
+            print(f"[*] 正在抓取 [HN 外链] 网页完整正文: {link}")
+            full_text = fetch_full_web_article(link)
+            if full_text and len(full_text) > 100:
+                return full_text
+        c_link = item.get("comments_link", "")
+        if c_link:
+            full_text = fetch_full_web_article(c_link)
+            if full_text and len(full_text) > 100:
+                return full_text
+
+    # GitHub Trending: 尝试抓取仓库 README 正文
+    if src == "GitHub Trending" and link:
+        readme_url = link.rstrip("/") + "/blob/main/README.md"
+        full_text = fetch_full_web_article(readme_url)
+        if full_text and len(full_text) > 100:
+            return full_text
+
+    # 顶会精选 (Hugging Face) 与 学术科研 (arXiv): details 本身已是完整官方 Abstract 全文
+    # 社交动态 (X) 与 社区热点 (Reddit): details 为完整核心主题描述
+    return item.get("details", "")
+
 def build_broadcast_and_summary(news_items):
-    """提炼中文播报稿与微信/QQ速览文本"""
+    """直接读取完整文章与资讯全文，生成完整播报稿与微信/QQ速览文本（不再进行摘要截取）"""
     now_str = datetime.now().strftime("%H点%M分")
 
     broadcast_lines = [
         f"大家好，这里是人工智能最新动态播报，当前时间为{now_str}。",
-        "接下来为您带来最新精选的AI行业前沿与技术进展："
+        "接下来为您带来最新精选AI前沿文章与技术成果的完整内容解读："
     ]
 
     summary_lines = [
-        f"📢 今日 AI 最新动态速览 ({datetime.now().strftime('%Y-%m-%d %H:%M')})",
-        "（语音播报已同步发送至上方，以下为核心要点解读）：\n"
+        f"📢 今日 AI 最新动态完整速递 ({datetime.now().strftime('%Y-%m-%d %H:%M')})",
+        "（语音播报已同步发送至上方，以下为完整全文内容呈现）：\n"
     ]
 
     for idx, item in enumerate(news_items, 1):
         cat = item["category"]
         src = item["source"]
         title_en = item["title"]
-        details_en = item["details"]
 
-        # 翻译并提炼中文标题与细节总结
+        # 1. 抓取完整全文（不再使用短摘要截取）
+        full_content_en = populate_full_content(item)
+        if not full_content_en:
+            full_content_en = item.get("details", "暂无更多详细背景。")
+
+        # 2. 翻译完整标题与完整正文内容
         title_zh = translate_to_zh(title_en)
-        details_zh = translate_to_zh(details_en) if details_en else "暂无更多详细背景。"
+        content_zh = translate_to_zh(full_content_en)
 
-        # 语音播报文案
-        speech_item = f"第{idx}条，{src}关于【{cat}】关注到：{title_zh}。核心要点指出：{details_zh}"
+        # 3. 语音播报文案（朗读完整文章/报告内容）
+        speech_item = f"第{idx}条，{src}关于【{cat}】发表文章：{title_zh}。完整内容如下：{content_zh}"
         broadcast_lines.append(speech_item)
 
-        # 文字版速览文案
+        # 4. 文字版速览文案（展示完整正文与段落）
         summary_lines.append(f"{idx}. 【{cat} · {src}】{title_zh}")
-        summary_lines.append(f"   💡 核心要点：{details_zh}")
+        summary_lines.append(f"   📄 完整内容：\n{content_zh}")
         if item.get("link"):
             summary_lines.append(f"   🔗 来源链接：{item['link']}")
         summary_lines.append("")
 
-    broadcast_lines.append("以上就是本次AI动态播报的全部内容，感谢您的收听！")
+    broadcast_lines.append("以上就是本次AI动态播报的全部完整资讯，感谢您的收听！")
 
-    broadcast_text = "\n".join(broadcast_lines)
+    broadcast_text = "\n\n".join(broadcast_lines)
     summary_text = "\n".join(summary_lines)
     return broadcast_text, summary_text
 
 # ==================== 发送与执行流程 ====================
 
 def synthesize_audio(text: str, output_path: Path):
-    print(f"[*] 正在合成 TTS 语音到: {output_path}")
+    print(f"[*] 正在合成 TTS 语音到: {output_path} (文本总字数: {len(text)})")
     TEXT_FILE.write_text(text, encoding="utf-8")
     cmd = [
         EDGE_TTS_BIN,
@@ -361,13 +606,27 @@ def send_qq_audio(audio_path: Path, title: str):
         print(f"[-] 推送音频失败: {res.stderr}", file=sys.stderr)
 
 def send_qq_text(summary_text: str):
-    print("[*] 正在发送 QQ 文字版要点速览...")
-    cmd = ["hermes", "send", "--to", "qqbot", summary_text]
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.stdout:
-        print(res.stdout.strip())
-    if res.returncode != 0:
-        print(f"[-] 发送文字版失败: {res.stderr}", file=sys.stderr)
+    print("[*] 正在发送 QQ 文字版完整资讯...")
+    max_chunk = 3000
+    if len(summary_text) <= max_chunk:
+        cmd = ["hermes", "send", "--to", "qqbot", summary_text]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.stdout:
+            print(res.stdout.strip())
+        if res.returncode != 0:
+            print(f"[-] 发送文字版失败: {res.stderr}", file=sys.stderr)
+    else:
+        remaining = summary_text
+        part_idx = 1
+        while remaining:
+            chunk = remaining[:max_chunk]
+            remaining = remaining[max_chunk:]
+            header = f"[第{part_idx}部分] " if part_idx > 1 else ""
+            cmd = ["hermes", "send", "--to", "qqbot", header + chunk]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.stdout:
+                print(res.stdout.strip())
+            part_idx += 1
 
 def main():
     start_time = datetime.now()
@@ -377,7 +636,7 @@ def main():
     history_keys = load_history()
     print(f"[*] 已加载历史去重记录库，共 {len(history_keys)} 条记录")
 
-    # 2. 多源并发/顺序抓取
+    # 2. 多源抓取
     all_fetched = []
     sources = [
         ("TechCrunch AI", fetch_techcrunch_ai),
@@ -385,6 +644,10 @@ def main():
         ("Hacker News AI", fetch_hn_ai),
         ("Hugging Face Daily Papers", fetch_hf_papers),
         ("arXiv cs.AI", fetch_arxiv_ai),
+        ("X (Twitter) AI", fetch_x_ai),
+        ("Reddit AI", fetch_reddit_ai),
+        ("OpenAI Official News", fetch_openai_news),
+        ("GitHub Trending AI", fetch_github_trending_ai),
     ]
 
     for name, fetcher in sources:
@@ -404,24 +667,24 @@ def main():
         print("=== [OpenClaw AI News Cron Job Finished (No New Content)] ===")
         return
 
-    # 4. 智能跨源挑选 2~3 条
-    selected_news = select_diverse_news(fresh_news, max_count=3)
-    print(f"[*] 已选定 {len(selected_news)} 条多元资讯进行提炼与语音播报:")
+    # 4. 智能挑选多元资讯进行完整播报
+    selected_news = select_diverse_news(fresh_news, max_count=2)
+    print(f"[*] 已选定 {len(selected_news)} 条多元资讯进行完整全文读取与语音播报:")
     for it in selected_news:
         print(f"    - [{it['category']} · {it['source']}] {it['title']}")
 
-    # 5. 生成播报稿件与文字速览
+    # 5. 生成完整全文播报稿件与文字速览
     broadcast_text, summary_text = build_broadcast_and_summary(selected_news)
     SUMMARY_FILE.write_text(summary_text, encoding="utf-8")
-    print(f"[+] 播报文案准备完成，语音稿共 {len(broadcast_text)} 字")
+    print(f"[+] 播报文案准备完成，完整语音稿共 {len(broadcast_text)} 字")
 
     # 6. TTS 语音合成
     synthesize_audio(broadcast_text, AUDIO_FILE)
 
     # 7. 推送音频至 QQ 机器人
-    send_qq_audio(AUDIO_FILE, f"AI新动态播报_{datetime.now().strftime('%H%M')}.mp3")
+    send_qq_audio(AUDIO_FILE, f"AI完整动态播报_{datetime.now().strftime('%H%M')}.mp3")
 
-    # 8. 推送图文/文字要点速览至 QQ 机器人
+    # 8. 推送完整文字内容至 QQ 机器人
     send_qq_text(summary_text)
 
     # 9. 记录已播报资讯至去重库
