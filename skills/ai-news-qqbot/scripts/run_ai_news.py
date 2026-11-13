@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 """
-AI News fetcher, full-text reader, deduplicator, TTS synthesizer, and QQ Bot dispatcher.
-Reads full articles/papers/discussions without summary truncation.
+AI News & X Timeline fetcher, full-text reader, deduplicator, TTS synthesizer, and QQ Bot dispatcher.
+Uses bird CLI to fetch user's personal X timeline directly without summary truncation.
 Integrated Sources:
-  - TechCrunch AI (Business/Funding/Industry)
-  - The Verge AI (Consumer Tech & Trends)
-  - Hacker News AI (Top Community Tech Debates via Algolia & RSS)
-  - Hugging Face Daily Papers (Top Community Papers)
-  - arXiv cs.AI (Academic Research Abstracts)
-  - X / Twitter AI (Frontier labs & AI figures trending discussions)
-  - Reddit AI (r/LocalLLaMA, r/singularity, r/MachineLearning)
-  - OpenAI Newsroom (Official Models & Releases)
-  - GitHub Trending (Trending Open-Source AI/LLM Projects)
+  - User X (Twitter) Timeline via bird CLI
 """
 import os
 import re
@@ -222,6 +214,86 @@ def translate_to_zh(text: str) -> str:
     return "\n".join(translated_parts).strip()
 
 # ==================== 数据源抓取模块 ====================
+
+def get_bird_env():
+    """Prepare environment with auth credentials for bird CLI."""
+    env = os.environ.copy()
+    if not env.get("AUTH_TOKEN") or not env.get("CT0"):
+        for cfg_path in ["/Users/wcb/.birdrc.json5", "/Users/wcb/.config/bird/config.json5"]:
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    token = data.get("authToken") or data.get("auth_token")
+                    ct0 = data.get("ct0")
+                    if token and ct0:
+                        env["AUTH_TOKEN"] = token
+                        env["CT0"] = ct0
+                        break
+                except Exception:
+                    pass
+    return env
+
+def fetch_x_timeline():
+    """通过 bird CLI 从用户的 X 时间线抓取最新推文与 AI/前沿资讯"""
+    items = []
+    try:
+        bird_bin = "/opt/homebrew/bin/bird" if os.path.exists("/opt/homebrew/bin/bird") else "bird"
+        env = get_bird_env()
+        cmd = [bird_bin, "home", "--count", "30", "--json"]
+        res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=30)
+        if res.returncode != 0:
+            print(f"[!] bird 获取时间线失败: {res.stderr}", file=sys.stderr)
+            return items
+
+        tweets = json.loads(res.stdout) if res.stdout else []
+        ai_keywords = [
+            "ai", "llm", "gpt", "model", "claude", "deepseek", "agent", 
+            "openai", "anthropic", "gemini", "transformer", "prompt", "rag", 
+            "reasoning", "大模型", "智能", "模型", "算法", "生图", "生成式", "算力"
+        ]
+
+        for t in tweets:
+            text = (t.get("text") or "").strip()
+            if not text:
+                continue
+
+            is_ai = any(kw in text.lower() for kw in ai_keywords)
+            author_info = t.get("author") or {}
+            author_name = author_info.get("name") or author_info.get("username") or "X User"
+            username = author_info.get("username") or ""
+            tweet_id = str(t.get("id") or "")
+            link = f"https://x.com/{username}/status/{tweet_id}" if username and tweet_id else ""
+
+            quoted = t.get("quotedTweet")
+            full_text = text
+            if quoted and isinstance(quoted, dict):
+                q_author = quoted.get("author", {}).get("name", "")
+                q_text = quoted.get("text", "")
+                if q_text:
+                    full_text = full_text + "\n\n[引用 @" + str(q_author) + " 原推]: " + str(q_text)
+
+            first_line = text.splitlines()[0] if text else ""
+            clean_title = first_line[:60].strip()
+            if len(clean_title) < 10 and len(text) > 10:
+                clean_title = " ".join(text[:60].split()).strip()
+            title_display = f"@{username} ({author_name}): {clean_title}"
+
+            items.append({
+                "category": "X时间线" if is_ai else "X关注动态",
+                "source": f"X (@{username})" if username else "X时间线",
+                "title": title_display,
+                "details": full_text,
+                "link": link,
+                "is_ai": is_ai,
+                "key": get_item_key(clean_title, link if link else tweet_id)
+            })
+
+        items.sort(key=lambda x: (not x.get("is_ai", False)))
+    except Exception as e:
+        print(f"[!] 抓取 X 时间线失败: {e}", file=sys.stderr)
+    return items
+
 
 def fetch_techcrunch_ai():
     """1. 商业前沿: TechCrunch AI"""
@@ -536,13 +608,8 @@ def populate_full_content(item: dict) -> str:
     return item.get("details", "")
 
 def build_broadcast_and_summary(news_items):
-    """直接读取完整文章与资讯全文，生成完整播报稿与微信/QQ速览文本（不再进行摘要截取）"""
-    now_str = datetime.now().strftime("%H点%M分")
-
-    broadcast_lines = [
-        f"大家好，这里是人工智能最新动态播报，当前时间为{now_str}。",
-        "接下来为您带来最新精选AI前沿文章与技术成果的完整内容解读："
-    ]
+    """直接读取完整文章与资讯内容，去掉一头一尾套话、作者与标题，直接读内容"""
+    broadcast_lines = []
 
     summary_lines = [
         f"📢 今日 AI 最新动态完整速递 ({datetime.now().strftime('%Y-%m-%d %H:%M')})",
@@ -554,27 +621,23 @@ def build_broadcast_and_summary(news_items):
         src = item["source"]
         title_en = item["title"]
 
-        # 1. 抓取完整全文（不再使用短摘要截取）
+        # 1. 抓取完整全文
         full_content_en = populate_full_content(item)
         if not full_content_en:
-            full_content_en = item.get("details", "暂无更多详细背景。")
+            full_content_en = item.get("details", "")
 
-        # 2. 翻译完整标题与完整正文内容
+        # 2. 翻译正文内容与标题（标题仅用于文字版）
         title_zh = translate_to_zh(title_en)
         content_zh = translate_to_zh(full_content_en)
 
-        # 3. 语音播报文案（朗读完整文章/报告内容）
-        speech_item = f"第{idx}条，{src}关于【{cat}】发表文章：{title_zh}。完整内容如下：{content_zh}"
-        broadcast_lines.append(speech_item)
+        # 3. 语音播报文案（去掉套话、作者、标题，直接读内容）
+        if content_zh.strip():
+            broadcast_lines.append(content_zh.strip())
 
-        # 4. 文字版速览文案（展示完整正文与段落）
+        # 4. 文字版速览文案
         summary_lines.append(f"{idx}. 【{cat} · {src}】{title_zh}")
         summary_lines.append(f"   📄 完整内容：\n{content_zh}")
-        if item.get("link"):
-            summary_lines.append(f"   🔗 来源链接：{item['link']}")
         summary_lines.append("")
-
-    broadcast_lines.append("以上就是本次AI动态播报的全部完整资讯，感谢您的收听！")
 
     broadcast_text = "\n\n".join(broadcast_lines)
     summary_text = "\n".join(summary_lines)
@@ -636,18 +699,10 @@ def main():
     history_keys = load_history()
     print(f"[*] 已加载历史去重记录库，共 {len(history_keys)} 条记录")
 
-    # 2. 多源抓取
+    # 2. 从用户 X 时间线定向抓取（基于 bird 工具）
     all_fetched = []
     sources = [
-        ("TechCrunch AI", fetch_techcrunch_ai),
-        ("The Verge AI", fetch_verge_ai),
-        ("Hacker News AI", fetch_hn_ai),
-        ("Hugging Face Daily Papers", fetch_hf_papers),
-        ("arXiv cs.AI", fetch_arxiv_ai),
-        ("X (Twitter) AI", fetch_x_ai),
-        ("Reddit AI", fetch_reddit_ai),
-        ("OpenAI Official News", fetch_openai_news),
-        ("GitHub Trending AI", fetch_github_trending_ai),
+        ("X 时间线 (bird)", fetch_x_timeline),
     ]
 
     for name, fetcher in sources:
@@ -684,8 +739,8 @@ def main():
     # 7. 推送音频至 QQ 机器人
     send_qq_audio(AUDIO_FILE, f"AI完整动态播报_{datetime.now().strftime('%H%M')}.mp3")
 
-    # 8. 推送完整文字内容至 QQ 机器人
-    send_qq_text(summary_text)
+    # 8. 推送完整文字内容至 QQ 机器人 (根据要求：只发送音频，不发送文字内容)
+    # send_qq_text(summary_text)
 
     # 9. 记录已播报资讯至去重库
     for item in selected_news:
